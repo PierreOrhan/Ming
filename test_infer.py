@@ -78,7 +78,7 @@ if __name__ == '__main__':
         {
             "role": "HUMAN",
             "content": [
-                {"type": "video", "video": os.path.join(vision_path, "yoga.mp4"), 'min_pixels': 100352, 'max_pixels': 602112, "sample": "uniform"},
+                {"type": "video", "video": os.path.join(vision_path, "yoga.mp4"), "max_frames":40, "sample": "uniform"},
                 {"type": "text", "text": "What is the woman doing?"},
             ],
         },

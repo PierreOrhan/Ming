@@ -208,7 +208,7 @@ class BailingMMProcessor(ProcessorMixin):
             }
 
         if videos is not None:
-            video_inputs = self.image_processor(images=None, videos=videos, **output_kwargs["videos_kwargs"])
+            video_inputs = self.image_processor(images=None, videos=videos, do_resize=False, **output_kwargs["videos_kwargs"])
             video_grid_thw = video_inputs["video_grid_thw"]
             text = self._expand_video_tokens(text, video_grid_thw)
 

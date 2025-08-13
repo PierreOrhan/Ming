@@ -33,7 +33,7 @@ MAX_RATIO = 200
 
 VIDEO_MIN_PIXELS = 128 * 28 * 28
 VIDEO_MAX_PIXELS = 768 * 28 * 28  # 4: 3 => 32: 24 (768) | 16:9 => 32:18 (576)
-VIDEO_TOTAL_PIXELS = 9216 * 28 * 28  # 9216: 24-72 frames | 7680: 10-60 frames | 6144: 8-48 frames
+VIDEO_TOTAL_PIXELS = 96 * 128 * 28 * 28  # 9216: 24-72 frames | 7680: 10-60 frames | 6144: 8-48 frames
 
 FRAME_FACTOR = 2
 FPS = 2.0
@@ -400,11 +400,8 @@ def fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR, return_video_sample
             num_frames, _, height, width = video.shape
             min_pixels = ele.get("min_pixels", VIDEO_MIN_PIXELS)
             total_pixels = ele.get("total_pixels", VIDEO_TOTAL_PIXELS)
-            max_pixels = max(min(VIDEO_MAX_PIXELS, total_pixels / num_frames * FRAME_FACTOR), int(min_pixels * 1.05))
-            max_pixels_supposed = ele.get("max_pixels", max_pixels)
-            if max_pixels_supposed > max_pixels:
-                logger.warning(f"The given max_pixels[{max_pixels_supposed}] exceeds limit[{max_pixels}].")
-            max_pixels = min(max_pixels_supposed, max_pixels)
+            # max_pixels = max(min(VIDEO_MAX_PIXELS, total_pixels / num_frames * FRAME_FACTOR), int(min_pixels * 1.05))
+            max_pixels = max(total_pixels / num_frames * FRAME_FACTOR, int(min_pixels * 1.05))
 
             resized_height, resized_width = smart_resize(
                 height,
@@ -413,40 +410,79 @@ def fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR, return_video_sample
                 min_pixels=min_pixels,
                 max_pixels=max_pixels,
             )
-        video = transforms.functional.resize(
-            video,
-            [resized_height, resized_width],
-            interpolation=InterpolationMode.BICUBIC,
-            antialias=True,
-        ).float()
-        if return_video_sample_fps:
-            return video, sample_fps
-        return video
     else:
         assert isinstance(ele["video"], (list, tuple))
         process_info = ele.copy()
         process_info.pop("type", None)
         process_info.pop("video", None)
-        images = [
-            fetch_image({"image": video_element, **process_info}, size_factor=image_factor)
+        total_frames=len(ele['video'])
+        sample_method = ele.get("sample", "sequence")
+        sample_fps = process_info.pop("max_video_fps", 2.0)
+ 
+        video = [
+            torch.from_numpy(np.array(Image.open(video_element).convert("RGB")))
             for video_element in ele["video"]
         ]
-        # if len(images) > ele["max_frames"]:
-        #         num_frames_target = ele["max_frames"]
-        #         print(ele["max_frames"])
-        #         interval = len(images) // num_frames_target  # 计算抽取间隔
-        #         images = [images[i] for i in range(0, len(images), interval)][:num_frames_target]
-        num_frames = ceil_by_factor(len(images), FRAME_FACTOR)
-        if len(images) < num_frames:
-            images.extend([images[-1]] * (num_frames - len(images)))
-        if len(images) > ele["max_frames"]:
-            frame_indices = sample_frames(
-                num_frames=ele["max_frames"], total_frames=len(images), sample="uniform",
+        
+        num_frames = get_frames(ele, total_frames)
+        frame_indices = sample_frames(
+            num_frames=num_frames, total_frames=total_frames, sample=sample_method
+        )
+
+        if "resized_height" in ele and "resized_width" in ele:
+            resized_height, resized_width = smart_resize(
+                ele["resized_height"],
+                ele["resized_width"],
+                factor=image_factor,
             )
-            images = [images[i] for i in frame_indices]
-        if return_video_sample_fps:
-            return images, process_info.pop("sample_fps", 2.0)
-        return images
+        else:
+            height, width, _ = video[1].shape
+            min_pixels = ele.get("min_pixels", VIDEO_MIN_PIXELS)
+            total_pixels = ele.get("total_pixels", VIDEO_TOTAL_PIXELS)
+            # max_pixels = max(min(VIDEO_MAX_PIXELS, total_pixels / num_frames * FRAME_FACTOR), int(min_pixels * 1.05))
+            max_pixels = max(total_pixels / num_frames * FRAME_FACTOR, int(min_pixels * 1.05))
+
+            resized_height, resized_width = smart_resize(
+                height,
+                width,
+                factor=28,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+            )
+        # 3) gather shapes of the sampled frames
+        shapes = [ video[i].shape[:2] for i in frame_indices ]  # list of (H,W)
+        # pick the shape that occurs most often
+        
+        major_shape, _ = Counter(shapes).most_common(1)[0]
+        major_h, major_w = major_shape
+
+        # VNIAH could have one outlier shape
+        for idx in frame_indices:
+            h, w = video[idx].shape[:2]
+            if (h, w) != (major_h, major_w):
+                # re-open, resize via PIL + TF, then to tensor
+                img = Image.open(ele["video"][idx]).convert("RGB")
+                img = transforms.functional.resize(
+                    img,
+                    [major_h, major_w],
+                    interpolation=InterpolationMode.BICUBIC,
+                    antialias=True,
+                )
+                arr = np.array(img)
+                video[idx] = torch.from_numpy(arr)
+
+        video = torch.stack(video, dim=0)
+        video = video.permute(0, 3, 1, 2).float()
+    logger.info("video-in:  num_frames={}, resized_height={}, resized_width={}".format(video.shape[0],resized_height,resized_width))
+    video = transforms.functional.resize(
+        video,
+        [resized_height, resized_width],
+        interpolation=InterpolationMode.BICUBIC,
+        antialias=True,
+    ).float()
+    if return_video_sample_fps:
+        return video, sample_fps
+    return video
 
 def fetch_audio(ele: dict[str, str | torch.Tensor], return_tensor="pt") -> Tuple[Union[torch.Tensor, np.ndarray], int]:
     if "audio" in ele:
@@ -477,6 +513,7 @@ def extract_vision_info(conversations: list[dict] | list[list[dict]]) -> list[di
         for message in conversation:
             if isinstance(message["content"], list):
                 for ele in message["content"]:
+                    sample_method = ele.get("sample", "sequence")
                     if (
                             "image" in ele
                             or "image_url" in ele
@@ -486,18 +523,19 @@ def extract_vision_info(conversations: list[dict] | list[list[dict]]) -> list[di
                     ):
                         vision_infos.append(ele)
                     # 把视频的 query_text 也加进来
-                    if "text" in ele: text = ele["text"]
-                    if "video" in ele and ele["sample"] == "adaptive":
+                    if "text" in ele: 
+                        text = ele["text"]
+                    if "video" in ele and sample_method == "adaptive":
                         tokenizer = ele["tokenizer"]
                         model = ele["model"]
                         image_processor = ele["image_processor"]
     for ele in vision_infos:
-        if "video" in ele and ele["sample"] == "adaptive":
+        sample_method = ele.get("sample", "sequence")
+        if "video" in ele and sample_method == "adaptive":
             ele["text"] = text
             ele["tokenizer"] = tokenizer
             ele["model"] = model
             ele["image_processor"] = image_processor
-    return vision_infos
     return vision_infos
 
 def process_vision_info(
@@ -520,7 +558,7 @@ def process_vision_info(
             if is_video(vision_info['video']):
                 data_value = vision_info['video']
             else:
-                data_value = [os.path.join(vision_info['video'], frame) for frame in os.listdir(vision_info['video'])]
+                data_value = [os.path.join(vision_info['video'], frame) for frame in sorted(os.listdir(vision_info['video']))]
             vision_info['video']=data_value
             video_inputs.append(fetch_video(vision_info))
         elif "audio" in vision_info or "audio_url" in vision_info:
