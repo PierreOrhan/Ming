@@ -1,0 +1,13 @@
+{
+    "python.analysis.extraPaths": [
+        "/home/pierre/Documents/Ming"
+    ],
+    "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/node_modules/*/**": true,
+    "**/ming/data/**": true,
+    "**/ming/__pycache__/**": true,
+    "**/ming/docker/**": true,
+  }
+}
