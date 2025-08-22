@@ -13,7 +13,7 @@ class WhisperAudioEncoder(AudioEncoder):
         super().__init__(n_mels, n_ctx, n_state, n_head, n_layer)
         self.audio_emb_dim = n_state
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor,output_hidden_states: bool = False) -> Tensor:
         """
            x : torch.Tensor, shape = [B, T, d] the mel spectrogram of the audio
        """
@@ -25,11 +25,17 @@ class WhisperAudioEncoder(AudioEncoder):
         assert x.shape[1:] == positional_embedding.shape, "incorrect audio shape"
         x = (x + positional_embedding).to(x.dtype)
 
+        if output_hidden_states:
+            all_hidden_states = (x,)
         for block in self.blocks:
             x = block(x)
+            if output_hidden_states:
+                all_hidden_states += (x,)
 
         x = self.ln_post(x)
-        return x
+        if output_hidden_states:
+            return x, all_hidden_states
+        return (x,)
 
     @classmethod
     def from_pretrained(cls, model_path, **kwargs):

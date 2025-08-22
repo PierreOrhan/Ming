@@ -76,6 +76,9 @@ class BailingMMCausalLMOutputWithPast(ModelOutput):
     logits: torch.FloatTensor = None
     past_key_values: Optional[List[torch.FloatTensor]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    hidden_states_vision: Optional[Tuple[torch.FloatTensor]] = None
+    hidden_states_audio: Optional[Tuple[torch.FloatTensor]] = None
+    router_logits: Optional[torch.FloatTensor] = None
 
 
 class BailingMMNativeForConditionalGeneration(PreTrainedModel):
@@ -139,7 +142,8 @@ class BailingMMNativeForConditionalGeneration(PreTrainedModel):
             self.linear_proj_audio = nn.Sequential(*mlp_modules_audio)
 
         if self.config.talker_config:
-            self.config.talker_config._name_or_path = f"{self.config._name_or_path}/talker"
+
+            self.config.talker_config._name_or_path = f"{self.config._name_or_path}/talker" 
             self.talker = BailingTalkerForConditionalGeneration(self.config.talker_config)
         self.post_init()
         
@@ -299,25 +303,27 @@ class BailingMMNativeForConditionalGeneration(PreTrainedModel):
 
         return position_ids, mrope_position_deltas
 
-    def extract_image_feature(self, pixel_values, grid_thw):
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-            image_embeds = self.vision(pixel_values, grid_thw=grid_thw)
+    def extract_image_feature(self, pixel_values, grid_thw,output_hidden_states=False):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            outputs = self.vision(pixel_values, grid_thw=grid_thw, output_hidden_states=output_hidden_states)
+            image_embeds = outputs[0]
             image_embeds = image_embeds.float()
             image_embeds = self.linear_proj(image_embeds)
         image_embeds = F.normalize(image_embeds, dim=-1)
-        return image_embeds
+        return image_embeds, outputs[1]
 
-    def extract_audio_feature(self, audio_feats, audio_feats_lengths, use_whisper_encoder=False):
-        audio_embeds, _, audio_embeds_lengths = encode_audio_segments(
+    def extract_audio_feature(self, audio_feats, audio_feats_lengths, use_whisper_encoder=False,output_hidden_states=False):
+        audio_embeds, _, audio_embeds_lengths,all_hidden_states = encode_audio_segments(
             encoder=self.audio,
             proj_layer=self.linear_proj_audio,
             wav_feats=audio_feats,
             wav_feats_lengths=audio_feats_lengths,
             audio_config=self.config.audio_config,
+            output_hidden_states = output_hidden_states,
         )
         if self.config.audio_config.norm_query_embeds:
             audio_embeds = F.normalize(audio_embeds, dim=2)  # [-1, 256, 2048]
-        return audio_embeds.to(audio_feats.dtype), audio_embeds_lengths
+        return audio_embeds.to(audio_feats.dtype), audio_embeds_lengths,all_hidden_states
 
     def prompt_wrap_vision(self, input_ids, inputs_embeds, vision_embeds, image_token_id=None):
         if vision_embeds is None or input_ids is None:
@@ -428,6 +434,8 @@ class BailingMMNativeForConditionalGeneration(PreTrainedModel):
         audio_placeholder_loc_lens: Optional[torch.LongTensor] = None,
         past_key_values: Optional[List[torch.Tensor]] = None,
         use_whisper_encoder: bool = False,
+        output_router_logits: Optional[bool] = False,
+        **kwargs: Any,
     ) -> Union[Tuple, BailingMMCausalLMOutputWithPast]:
         output_attentions = (
             output_attentions if output_attentions is not None else self.config.output_attentions
@@ -440,11 +448,12 @@ class BailingMMNativeForConditionalGeneration(PreTrainedModel):
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if (input_ids is None) ^ (inputs_embeds is not None):
-            raise ValueError(
-                "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
-            )
-
+        # FIX: correct mutual exclusivity check
+        if input_ids is None and inputs_embeds is None:
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds.")
+        if input_ids is not None and inputs_embeds is not None:
+            raise ValueError("You cannot specify both input_ids and inputs_embeds.")
+        
         if (
             pixel_values is not None or pixel_values_videos is not None or audio_feats is not None
         ) and inputs_embeds is not None:
@@ -452,42 +461,49 @@ class BailingMMNativeForConditionalGeneration(PreTrainedModel):
                 "You cannot specify both pixel_values/pixel_values_videos/pixel_values_audios and inputs_embeds at the same time, and must specify either one"
             )
 
-        image_embeds, video_embeds, audio_embeds, audio_embeds_lengths = None, None, None, None
-        if pixel_values is not None:
-            image_embeds = self.extract_image_feature(pixel_values, grid_thw=image_grid_thw)
-        if pixel_values_videos is not None:
-            video_embeds = self.extract_image_feature(pixel_values_videos, grid_thw=video_grid_thw)
-        if audio_feats is not None:
-            audio_embeds, audio_embeds_lengths = self.extract_audio_feature(
-                audio_feats, audio_feats_lengths, use_whisper_encoder=use_whisper_encoder
-            )
+        with torch.amp.autocast("cuda",dtype=torch.bfloat16):
 
-        if (
-            image_embeds is None and video_embeds is None and audio_embeds is None
-        ) or input_ids.size(1) == 1:
-            words_embeddings = self.model.get_input_embeddings()(
-                input_ids.clip(0, self.model.get_input_embeddings().weight.shape[0] - 1)
-            )
-            image_mask = None
-            audio_mask = None
+            image_embeds, video_embeds, audio_embeds, audio_embeds_lengths = None, None, None, None
+            if pixel_values is not None:
+                outputs_vision = self.extract_image_feature(pixel_values, grid_thw=image_grid_thw,output_hidden_states=output_hidden_states)
+                image_embeds = outputs_vision[0]
+            if pixel_values_videos is not None:
+                video_embeds = self.extract_image_feature(pixel_values_videos, grid_thw=video_grid_thw)
+            if audio_feats is not None:
+                
+                audio_embeds, audio_embeds_lengths,hidden_states_audio = self.extract_audio_feature(
+                    audio_feats, audio_feats_lengths, use_whisper_encoder=use_whisper_encoder,
+                    output_hidden_states=output_hidden_states
+                )
 
-        else:
-            words_embeddings, image_mask, audio_mask = self.prompt_wrap_navit(
-                input_ids.clip(0, self.model.get_input_embeddings().weight.shape[0] - 1),
-                image_embeds,
-                video_embeds,
-                audio_embeds,
-                audio_embeds_lengths,
-                audio_placeholder_loc_lens,
-                None,  # noqa
-            )
+            if (
+                image_embeds is None and video_embeds is None and audio_embeds is None
+            ) or (input_ids is not None and input_ids.size(1) == 1 and inputs_embeds is None):
+                words_embeddings = self.model.get_input_embeddings()(
+                    input_ids.clip(0, self.model.get_input_embeddings().weight.shape[0] - 1)
+                )
+                image_mask = None
+                audio_mask = None
+            else:
+                words_embeddings, image_mask, audio_mask = self.prompt_wrap_navit(
+                    input_ids.clip(0, self.model.get_input_embeddings().weight.shape[0] - 1),
+                    image_embeds,
+                    video_embeds,
+                    audio_embeds,
+                    audio_embeds_lengths,
+                    audio_placeholder_loc_lens,
+                    None,  # noqa
+                )
+            # Always pass only one of (input_ids, inputs_embeds) to backbone
+            backbone_input_ids = None
+            backbone_inputs_embeds = words_embeddings
 
         outputs = self.model(
-            input_ids=input_ids,
+            input_ids=backbone_input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
-            inputs_embeds=words_embeddings,
+            inputs_embeds=backbone_inputs_embeds,
             labels=labels,
             use_cache=use_cache,
             output_attentions=output_attentions,
@@ -495,6 +511,7 @@ class BailingMMNativeForConditionalGeneration(PreTrainedModel):
             return_dict=return_dict,
             image_mask=image_mask,
             audio_mask=audio_mask,
+            output_router_logits = output_router_logits,
         )
 
         return BailingMMCausalLMOutputWithPast(
@@ -502,6 +519,9 @@ class BailingMMNativeForConditionalGeneration(PreTrainedModel):
             logits=outputs.logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
+            hidden_states_vision = outputs_vision[1] if pixel_values is not None else None,
+            hidden_states_audio=hidden_states_audio if audio_feats is not None else None,
+            router_logits=outputs.router_logits if output_router_logits else None,
         )
 
     def append_input_ids_with_multiscale_learnable_tokens(
@@ -647,7 +667,7 @@ class BailingMMNativeForConditionalGeneration(PreTrainedModel):
         if pixel_values_videos is not None:
             video_embeds = self.extract_image_feature(pixel_values_videos, grid_thw=video_grid_thw)
 
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        with torch.amp.autocast("cuda",dtype=torch.bfloat16):
             if audio_feats is not None:
                 use_whisper_encoder = generate_kwargs.pop("use_whisper_encoder", True)
                 audio_embeds, audio_embeds_lengths = self.extract_audio_feature(

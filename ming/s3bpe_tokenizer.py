@@ -6,6 +6,10 @@ from tokenizers import Tokenizer
 class S3BpeTokenizer():
     def __init__(self, bpe_model, mapping_file) -> None:
         # s3 bpe model
+        # self.sp = Tokenizer.from_pretrained(bpe_model, subfolder="talker/s3_bpe")
+        # # s3 token转为中文token
+        # self.mapping_file = bpe_model/mapping_file #self.sp.name_or_path/mapping_file
+
         self.sp = Tokenizer.from_file(bpe_model)
         # s3 token转为中文token
         self.mapping_file = mapping_file

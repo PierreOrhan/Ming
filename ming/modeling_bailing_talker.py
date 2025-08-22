@@ -1,37 +1,33 @@
-import logging
-import os
-import re
-import threading
-import time
-import uuid
-from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
-
-import numpy as np
+from typing import Optional, Tuple, List
+import os
+import yaml
+import re
 import torch
 import torch.nn as nn
 import torchaudio
-import yaml
+from hyperpyyaml import load_hyperpyyaml
+from contextlib import nullcontext
+import threading
+import numpy as np
+import time
+import torch
+import uuid
+
+from transformers import Qwen2Config, PreTrainedModel
+from transformers import Qwen2ForCausalLM, AutoTokenizer
 from ming.audio_detokenizer.cli.flow_stream_model import AudioDetokenizerModel
 from ming.audio_detokenizer.utils.common import fade_in_out
-from .configuration_bailing_talker import BailingTalkerConfig
-from hyperpyyaml import load_hyperpyyaml
 from .s3bpe_tokenizer import S3BpeTokenizer
+from .configuration_bailing_talker import BailingTalkerConfig
+from transformers.utils import ModelOutput
 from ming.sentence_manager.sentence_manager import SentenceNormalizer
+import logging
 try:
-    from ming.talker.sync_vllm_infer import (
-        SamplingParams,
-        construct_vllm,
-        get_vllm_request_id,
-        vllm_infer_generator,
-    )
+    from ming.talker.talker_vllm_client import VLLMClient
+    from ming.talker.sync_vllm_infer import construct_vllm, vllm_infer_generator, SamplingParams, get_vllm_request_id
 except:
     pass
-from ming.talker.talker_vllm_client import VLLMClient
-from transformers import AutoTokenizer, PreTrainedModel, Qwen2Config, Qwen2ForCausalLM
-from transformers.utils import ModelOutput
-
 
 @dataclass
 class BailingTalkerOutputWithPast(ModelOutput):

@@ -421,7 +421,7 @@ class Qwen2_5_VisionTransformer(PreTrainedModel):
 
         return window_index, cu_window_seqlens
 
-    def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, is_list=False, **kwargs) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, is_list=False, output_hidden_states= False, **kwargs) -> torch.Tensor:
         """
         Args:
             hidden_states (`torch.Tensor` of shape `(batch_size, seq_len, hidden_size)`):
@@ -467,7 +467,10 @@ class Qwen2_5_VisionTransformer(PreTrainedModel):
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
+        all_hidden_states = ()
         for layer_num, blk in enumerate(self.blocks):
+            if output_hidden_states:
+                all_hidden_states += (hidden_states.split(grid_thw.prod(dim=1).tolist()),)
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
             else:
@@ -482,10 +485,17 @@ class Qwen2_5_VisionTransformer(PreTrainedModel):
                     cu_seqlens=cu_seqlens_now,
                     rotary_pos_emb=rotary_pos_emb,
                 )
+        if output_hidden_states:
+            all_hidden_states += (hidden_states.split(grid_thw.prod(dim=1).tolist()),)
 
         hidden_states = self.merger(hidden_states)
 
         reverse_indices = torch.argsort(window_index)
         hidden_states = hidden_states[reverse_indices, :]
+        
+        # if output_hidden_states:
+        #     all_hidden_states += (hidden_states.split((grid_thw.prod(dim=1)//(self.config.spatial_merge_size**2)).tolist()),)
 
-        return hidden_states
+        if output_hidden_states:
+            return hidden_states, all_hidden_states
+        return (hidden_states,None)

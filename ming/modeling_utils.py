@@ -889,6 +889,7 @@ def encode_audio_segments(
     waveforms_lengths=None,
     use_waveform=False,
     audio_config=None,
+    output_hidden_states = False,
 ):
     """
     Apply audio encoder to input audio features in wrapped format.
@@ -909,7 +910,8 @@ def encode_audio_segments(
         # for whisper encoder
         # feat_segs_batch: [B, T, n_mels]
         # feat_seg_lengths: [B]
-        audio_feats_seg = encoder(feat_segs_batch)
+        outputs_audio = encoder(feat_segs_batch,output_hidden_states=output_hidden_states)
+        audio_feats_seg = outputs_audio[0]
         audio_feats_seg_proj = proj_layer(audio_feats_seg.transpose(-1, -2)).transpose(-1, -2)
         feat_seg_lengths = feat_seg_lengths.to(feat_segs_batch.device)
         # whisper encoder conv
@@ -925,7 +927,7 @@ def encode_audio_segments(
     audio_feats_proj, _, audio_feats_lengths2 = wrap_feats(audio_feats_seg_proj, input_lengths, audio_feat_seg_lengths)
     assert torch.all(audio_feats_lengths == audio_feats_lengths2), f"{audio_feats_lengths}, {audio_feats_lengths2}"
 
-    return audio_feats_proj, audio_feats, audio_feats_lengths
+    return audio_feats_proj, audio_feats, audio_feats_lengths, outputs_audio[1] if output_hidden_states else None
 
 def patch_continuous_features(
     input_embeddings: torch.Tensor,
