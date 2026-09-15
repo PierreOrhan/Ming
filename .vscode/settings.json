@@ -1,6 +1,7 @@
 {
     "python.analysis.extraPaths": [
-        "/home/pierre/Documents/Ming"
+      "/home/pierre/Documents/Ming",
+      "/home/pierre/miniconda3/envs/transformersV4"
     ],
     "files.watcherExclude": {
     "**/.git/objects/**": true,
@@ -9,5 +10,7 @@
     "**/ming/data/**": true,
     "**/ming/__pycache__/**": true,
     "**/ming/docker/**": true,
-  }
+  },
+  "python-envs.defaultEnvManager": "ms-python.python:conda",
+  "python-envs.defaultPackageManager": "ms-python.python:conda"
 }

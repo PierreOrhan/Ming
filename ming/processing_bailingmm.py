@@ -12,6 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Modified by Pierre Orhan, 2025-2026:
+# - Imports rewritten as relative/package imports for the `ming` package layout.
 """Processor class for BailingMM."""
 
 import sys

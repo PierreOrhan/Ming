@@ -17,6 +17,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Modified by Pierre Orhan, 2025-2026:
+# - Imports rewritten as relative/package imports for the `ming` package layout.
+# - `Qwen2_5_VisionTransformer.forward` gains `output_hidden_states`: returns per-layer
+#   hidden states restored to the original patch order, and always returns a tuple.
 """PyTorch Qwen2_5_ViT model."""
 
 import math
@@ -467,10 +472,25 @@ class Qwen2_5_VisionTransformer(PreTrainedModel):
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
+        reverse_indices = torch.argsort(window_index)
+
         all_hidden_states = ()
         for layer_num, blk in enumerate(self.blocks):
             if output_hidden_states:
-                all_hidden_states += (hidden_states.split(grid_thw.prod(dim=1).tolist()),)
+                ## We have to undo the reordering into contiguous windows!
+                out_hidden_states = hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+                out_hidden_states = out_hidden_states[reverse_indices,:]
+                out_hidden_states = out_hidden_states.reshape(seq_len, -1)
+
+                # Finally we have to reverse the original mixing of the height and width that happened during preprocessing.
+                # see line 310 in image_processing_bailingmm.py: patches = patches.transpose(0, 3, 6, 4, 7, 2, 1, 5, 8)
+                # CAREFUL: the merge_size of the image processor is not gettable in the model.
+                # This means we have to hardcode it here. One way would be to pass it in the forward... TODO
+                out_hidden_states = out_hidden_states.reshape(-1, grid_thw[:,1].max()//2, grid_thw[:,2].max()//2,2,2,out_hidden_states.shape[-1])
+                out_hidden_states = out_hidden_states.permute(0, 1, 3, 2, 4, 5).reshape(-1, hidden_states.shape[-1])
+                
+                # The final split then separates back into a batch format:
+                all_hidden_states += (out_hidden_states.split(grid_thw.prod(dim=1).tolist()),)
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
             else:
@@ -486,11 +506,22 @@ class Qwen2_5_VisionTransformer(PreTrainedModel):
                     rotary_pos_emb=rotary_pos_emb,
                 )
         if output_hidden_states:
-            all_hidden_states += (hidden_states.split(grid_thw.prod(dim=1).tolist()),)
+            ## We have to undo the reordering into contiguous windows!
+            out_hidden_states = hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+            out_hidden_states = out_hidden_states[reverse_indices,:]
+            out_hidden_states = out_hidden_states.reshape(seq_len, -1)
+
+            # Finally we have to reverse the original mixing of the height and width that happened during preprocessing.
+            # see line 310 in image_processing_bailingmm.py: patches = patches.transpose(0, 3, 6, 4, 7, 2, 1, 5, 8)
+            # CAREFUL: the merge_size of the image processor is not gettable in the model.
+            # This means we have to hardcode it here. One way would be to pass it in the forward... TODO
+            out_hidden_states = out_hidden_states.reshape(-1, grid_thw[:,1].max()//2, grid_thw[:,2].max()//2,2,2,out_hidden_states.shape[-1])
+            out_hidden_states = out_hidden_states.permute(0, 1, 3, 2, 4, 5).reshape(-1, hidden_states.shape[-1])
+            
+            all_hidden_states += (out_hidden_states.split(grid_thw.prod(dim=1).tolist()),)
 
         hidden_states = self.merger(hidden_states)
 
-        reverse_indices = torch.argsort(window_index)
         hidden_states = hidden_states[reverse_indices, :]
         
         # if output_hidden_states:

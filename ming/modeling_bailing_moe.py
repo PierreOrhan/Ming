@@ -17,6 +17,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Modified by Pierre Orhan, 2025-2026:
+# - Imports rewritten as relative/package imports for the `ming` package layout.
+# - Compatibility with newer transformers Cache API (`_get_usable_past_kv_length`,
+#   `is_torch_fx_available` fallback, cache length handling in `prepare_inputs_for_generation`).
+# - Flash-attention target dtype taken from `query_key_value` instead of `q_proj`.
+# - Fallback for the `rope_deltas` delta computation during generation.
 """ PyTorch BailingMoE model."""
 import math
 import warnings
@@ -54,7 +61,12 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from transformers.utils.import_utils import is_torch_fx_available
+try:
+    from transformers.utils.import_utils import is_torch_fx_available
+except:
+    def is_torch_fx_available():
+        """Deprecated: kept for backwards compatibility with trust_remote_code models."""
+        return True
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -74,6 +86,26 @@ if is_torch_fx_available():
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "BailingMoeConfig"
+
+
+def _get_usable_past_kv_length(cache: Cache, new_seq_length: int, layer_idx: int = 0) -> int:
+    """Compute the usable past length for the given cache and upcoming new sequence length.
+
+    This mirrors the previous `get_usable_length(new_seq_length, layer_idx)` behavior that existed in
+    Transformers < 4.45, while being compatible with the new Cache API.
+    """
+    try:
+        previous_length = cache.get_seq_length(layer_idx)
+        # Dynamic layers return -1, static layers return an int
+        max_length = cache.get_max_cache_shape(layer_idx)
+        if max_length is not None and max_length != -1 and previous_length + new_seq_length > max_length:
+            return max_length - new_seq_length
+        return previous_length
+    except Exception:
+        # Best-effort fallback
+        return cache.get_seq_length(layer_idx) if hasattr(cache, "get_seq_length") else 0
+
+
 
 
 def _get_unpad_data(attention_mask):
@@ -661,7 +693,7 @@ class BailingMoeAttention(nn.Module):
                     "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
                     "with a layer index."
                 )
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            kv_seq_len += get_usable_length(past_key_value,kv_seq_len, self.layer_idx)
         
         if self.config.rope_scaling is not None and self.config.rope_scaling["type"] == "3D":
             cos, sin = self.rotary_emb(value_states, position_ids=position_ids)
@@ -770,7 +802,7 @@ class BailingMoeFlashAttention2(BailingMoeAttention):
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            kv_seq_len += _get_usable_past_kv_length(past_key_value, kv_seq_len, self.layer_idx)
             
         if self.config.rope_scaling is not None and self.config.rope_scaling["type"] == "3D":
             cos, sin = self.rotary_emb(value_states, position_ids=position_ids)
@@ -979,7 +1011,7 @@ class BailingMoeSdpaAttention(BailingMoeAttention):
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            kv_seq_len += _get_usable_past_kv_length(past_key_value, kv_seq_len, self.layer_idx)
 
         if self.config.rope_scaling is not None and self.config.rope_scaling["type"] == "3D":
             cos, sin = self.rotary_emb(value_states, position_ids=position_ids)
@@ -1326,7 +1358,7 @@ class BailingMoeModel(BailingMoePreTrainedModel):
             use_legacy_cache = not isinstance(past_key_values, Cache)
             if use_legacy_cache:
                 past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            past_key_values_length = past_key_values.get_usable_length(seq_length)
+            past_key_values_length = _get_usable_past_kv_length(past_key_values, seq_length)
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
@@ -1598,16 +1630,22 @@ class BailingMoeForCausalLM(BailingMoePreTrainedModel, GenerationMixin):
     ):
         if past_key_values is not None:
             if isinstance(past_key_values, Cache):
-                cache_length = past_key_values.get_seq_length()
-                past_length = past_key_values.seen_tokens
-                max_cache_length = (
-                    past_key_values.get_max_length()
-                    if hasattr(past_key_values, "get_max_length")
-                    else past_key_values.get_max_cache_shape()
-                )
+                cache_length = past_key_values.get_seq_length(0)
+                past_length = cache_length
+                try:
+                    max_cache_length = past_key_values.get_max_cache_shape(0)
+                    if max_cache_length == -1:
+                        max_cache_length = None
+                except Exception:
+                    max_cache_length = None
+                # # else:
+                # if past_key_values[0][0] is None:
+                #     cache_length = past_length = 0
             else:
                 cache_length = past_length = past_key_values[0][0].shape[2]
-                max_cache_length = None
+            max_cache_length = None
+            
+            #
             if inputs_embeds is not None:
                 input_ids = input_ids[:, -cache_position.shape[0]:]
             elif input_ids.shape[1] != cache_position.shape[0]:
@@ -1642,20 +1680,31 @@ class BailingMoeForCausalLM(BailingMoePreTrainedModel, GenerationMixin):
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and len(cache_position) == inputs_embeds.shape[1]:
             model_inputs = {"inputs_embeds": inputs_embeds}
+
+             # Pierre 22/01/2026: trying to debug this, there is a bug with the rope_deltas
             if rope_deltas is not None:
                 self.rope_deltas = rope_deltas
         else:
             model_inputs = {"input_ids": input_ids}
             image_mask = None
             audio_mask = None
+
+             # Pierre 22/01/2026: trying to debug this, there is a bug with the rope_deltas
             if rope_deltas is not None:
                 batch_size, seq_length = input_ids.shape
-                if past_key_values and self.rope_deltas:
-                    delta = past_key_values[0][1].shape[2] + self.rope_deltas
-                elif past_key_values:
-                    delta = torch.tensor(past_key_values[0][1].shape[2]).to(input_ids.device)
-                else:
-                    delta = torch.tensor(0).to(input_ids.device)
+                # print(self.rope_deltas)
+                try:
+                    if past_key_values and self.rope_deltas:
+                        delta = past_key_values[0][1].shape[2] + self.rope_deltas
+                    elif past_key_values:
+                        delta = torch.tensor(past_key_values[0][1].shape[2]).to(input_ids.device)
+                    else:
+                        delta = torch.tensor(0).to(input_ids.device)
+                except:
+                    if past_key_values:
+                        delta = torch.tensor(past_key_values[0][1].shape[2]).to(input_ids.device)
+                    else:
+                        delta = torch.tensor(0).to(input_ids.device)
                 position_ids = torch.arange(seq_length, device=input_ids.device)
                 position_ids = position_ids.view(1, -1).expand(batch_size, -1)
                 position_ids = position_ids.add(delta)

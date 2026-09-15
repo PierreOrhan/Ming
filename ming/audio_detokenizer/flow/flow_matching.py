@@ -12,6 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Modified by Pierre Orhan, 2025-2026:
+# - Import statements reordered/reformatted.
 import torch
 import torch.nn.functional as F
 from matcha.models.components.flow_matching import BASECFM

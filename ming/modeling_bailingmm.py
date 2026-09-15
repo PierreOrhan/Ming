@@ -606,9 +606,9 @@ class BailingMMNativeForConditionalGeneration(PreTrainedModel):
                 assert self.model is not None
                 assert self.vision is not None
                 if pixel_values is not None:
-                    image_embeds = self.extract_image_feature(pixel_values, grid_thw=image_grid_thw)
+                    image_embeds,_ = self.extract_image_feature(pixel_values, grid_thw=image_grid_thw)
                 if pixel_values_videos is not None:
-                    video_embeds = self.extract_image_feature(pixel_values_videos, grid_thw=video_grid_thw)
+                    video_embeds,_ = self.extract_image_feature(pixel_values_videos, grid_thw=video_grid_thw)
 
             assert self.loaded_image_gen_modules is True, "please add `load_image_gen=True` in from_pretrained() method"
             assert video_embeds is None
@@ -663,14 +663,14 @@ class BailingMMNativeForConditionalGeneration(PreTrainedModel):
             return image
 
         if pixel_values is not None:
-            image_embeds = self.extract_image_feature(pixel_values, grid_thw=image_grid_thw)
+            image_embeds,_ = self.extract_image_feature(pixel_values, grid_thw=image_grid_thw)
         if pixel_values_videos is not None:
-            video_embeds = self.extract_image_feature(pixel_values_videos, grid_thw=video_grid_thw)
+            video_embeds,_ = self.extract_image_feature(pixel_values_videos, grid_thw=video_grid_thw)
 
         with torch.amp.autocast("cuda",dtype=torch.bfloat16):
             if audio_feats is not None:
                 use_whisper_encoder = generate_kwargs.pop("use_whisper_encoder", True)
-                audio_embeds, audio_embeds_lengths = self.extract_audio_feature(
+                audio_embeds, audio_embeds_lengths,_ = self.extract_audio_feature(
                     audio_feats, audio_feats_lengths, use_whisper_encoder=use_whisper_encoder
                 )
             if (
